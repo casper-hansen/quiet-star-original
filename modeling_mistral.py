@@ -26,7 +26,6 @@ import time
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-import wandb
 from termcolor import colored
 from tqdm import tqdm
 import random
@@ -42,12 +41,12 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from ...activations import ACT2FN
-from ...cache_utils import Cache, DynamicCache
-from ...modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
-from ...modeling_utils import PreTrainedModel
-from ...utils import (
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     is_flash_attn_2_available,
@@ -55,7 +54,7 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_mistral import MistralConfig
+from configuration_mistral import MistralConfig
 
 
 if is_flash_attn_2_available():
@@ -2114,67 +2113,6 @@ class MistralForCausalLM(MistralPreTrainedModel):
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-    
-        base_log_dict = {
-            f"loss_{i}": nonzero_mean(loss_list[i]) for i in range(len(loss_list))
-        }
-
-        if loss is not None:
-            base_log_dict["loss_train"] = loss.item()
-        
-        for loss_key, loss_val in base_log_dict.items():
-            log_dict[loss_key] += loss_val / self.n_tokens_print
-                
-        if self.use_policy_loss and policy_reward is not None:
-            log_dict["policy_loss"] += dqn_loss / self.n_tokens_print
-            log_dict["policy_reward"] += policy_reward.mean() / self.n_tokens_print
-
-        if not loss_list:
-            if loss is not None:
-                log_dict["loss_0"] += loss / self.n_tokens_print
-        else:
-            log_dict["loss_final"] += nonzero_mean(loss_list[-1]) / self.n_tokens_print
-            log_dict["loss_talk"] += sum(nonzero_mean(cur_loss_item) for cur_loss_item in loss_list[-self.n_ahead_talk:]) / self.n_ahead_talk / self.n_tokens_print
-
-        # also log relative losses to loss_0
-        if loss_list:
-            for i in range(len(loss_list)):
-                talk_idx = min(max(i - (self.n_ahead - 1), 0), len(talk_loss_list) - 1)
-                if not talk_loss_list:
-                    cur_talk_loss = nonzero_mean(loss_list[0])
-                else:
-                    cur_talk_loss = talk_loss_list[talk_idx]
-                log_dict[f"rel_loss_{i}"] += (nonzero_mean(loss_list[i]) - cur_talk_loss) / self.n_tokens_print
-        if self.training:
-            self.training_steps += 1
-        try:
-            # if self.training_steps % (self.gradient_accumulation_steps * 256) == 0:
-            if self.wandb_enabled:
-                if self.training_steps % (self.n_tokens_print) == 0 or not self.training:# and "0" in str(loss.device):
-                    if not self.training:
-                        new_log_dict = {}
-                        for key in list(log_dict.keys()):
-                            new_log_dict["eval_" + key] = log_dict[key]
-                        log_dict = new_log_dict
-                    log_dict["training_steps"] = self.training_steps 
-                    log_dict["batch_size"] = batch_size
-                    log_dict["example_steps"] = self.training_steps * batch_size * self.gradient_accumulation_steps
-                    if self.n_ahead > 1:
-                        log_dict["compute_steps"] = self.training_steps * batch_size * (self.n_ahead + self.n_ahead_talk - 1) * self.gradient_accumulation_steps
-                    else: # There's no overhead for talk tokens if there's no thinking
-                        log_dict["compute_steps"] = self.training_steps * batch_size * self.gradient_accumulation_steps
-                    # remove all nans
-                    for key in list(log_dict.keys()):
-                        if log_dict[key] != log_dict[key]:
-                            del log_dict[key]
-                    if self.training:
-                        wandb.log(log_dict)
-                    if self.training:
-                        self.log_dict = defaultdict(int)
-                    else:
-                        self.eval_log_dict = defaultdict(int)
-        except Exception as e:
-            pass
 
         if not self.training:
             self.n_ahead_talk = n_ahead_talk_to_restore
