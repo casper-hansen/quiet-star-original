@@ -1,28 +1,24 @@
+"""
+nohup accelerate launch --use_deepspeed --deepspeed_config_file zero3.json quiet-star-train.py > log.txt 2>&1 &
+"""
+
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 import random
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextGenerationPipeline, AutoConfig
-from accelerate import infer_auto_device_map, init_empty_weights, dispatch_model
+from transformers import AutoTokenizer
 from datasets import load_dataset
-from torch.nn import CrossEntropyLoss
 from transformers import TrainingArguments, Trainer
-import os
 import time
-import wandb
-from huggingface_custom_callback import EarlyStoppingCallback
-from eval_helpers import preprocess_eval_function_gsm, preprocess_eval_function_csqa, preprocess_function, compute_metrics, truncate_or_pad
+from eval_helpers import preprocess_eval_function_gsm, preprocess_eval_function_csqa, preprocess_function, compute_metrics
+from modeling_mistral import MistralForCausalLM
 random_seed = 42
 torch.manual_seed(random_seed)
 random.seed(random_seed)
 
 # MAIN SETUP
-root_prefix = "YOUR_CACHE_PATH_HERE"
-wandb_cache_dir = root_prefix + "cache/quietstar/wandb_cache"
 dataset_name = 'open-web-math/open-web-math'
 # dataset_name = 'c4'
 project_name = "quiet-star"
-os.environ["WANDB_PROJECT"] = project_name + "-" + dataset_name.split("/")[-1]
-os.environ["WANDB_CACHE_DIR"] = wandb_cache_dir
 n_ahead_talk_global = 4
 n_passes_global = 2
 n_ahead_global = 12
@@ -53,11 +49,10 @@ def model_init(params):
 
     model_name = "mistralai/Mistral-7B-v0.1"
     print("Loading model")
-    model = AutoModelForCausalLM.from_pretrained(
+    model = MistralForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map='auto',
-        cache_dir=root_prefix + "cache",
         max_thoughts=n_ahead + n_ahead_talk + 1,
         merged_talk_heads=merged_talk_heads,
         merged_lm_and_talk_heads=False,
@@ -70,7 +65,7 @@ def model_init(params):
         use_weighted_talk_head=True,
     )
     print("Loaded model")
-    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
     tokenizer.padding_side = "right"
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
@@ -95,7 +90,7 @@ def model_init(params):
     model.residual_think_head = residual_think_head
     model.optimize_lm_head_only_at_start = optimize_lm_head_only_at_start
     model.gumbel_temperature = gumbel_temperature
-    model.wandb_enabled = True
+    model.wandb_enabled = False
     model.original_mode = original
     model.config_params = params
     model.run_start = int(time.time())
@@ -107,15 +102,14 @@ def model_init(params):
 dataset = load_dataset(
     dataset_name,
     "en" if "c4" in dataset_name else "default",
-    split=f"train[:{n_examples}]",
-    ignore_verifications=True,
-    num_proc=16,
-    cache_dir=root_prefix + "cache/datasets/",
+    split="train",
+    streaming=True,
 )
+dataset = dataset.take(n_examples)
 
-train_dataset = dataset.shuffle(seed=random_seed).map(preprocess_function, batched=True, writer_batch_size=200)
-eval_dataset_gsm = load_dataset("gsm8k", "main", split="test", ignore_verifications=True).map(preprocess_eval_function_gsm, batched=True, writer_batch_size=200)
-eval_dataset_csqa = load_dataset("tau/commonsense_qa", "default", split="validation", ignore_verifications=True).map(preprocess_eval_function_csqa, batched=True, writer_batch_size=200)
+train_dataset = dataset.shuffle(seed=random_seed).map(preprocess_function, batched=True, batch_size=200)
+eval_dataset_gsm = load_dataset("gsm8k", "main", split="test").map(preprocess_eval_function_gsm, batched=True, batch_size=200)
+eval_dataset_csqa = load_dataset("tau/commonsense_qa", "default", split="validation").map(preprocess_eval_function_csqa, batched=True, batch_size=200)
 
 eval_datasets = {
     "gsm8k": eval_dataset_gsm,
@@ -126,7 +120,7 @@ batch_size = full_batch_size // n_passes_global
 global_gradient_accumulation_steps = full_batch_size // batch_size
 run_id = int(time.time())
 training_args = TrainingArguments(
-    output_dir=root_prefix + f"cache/quietstar/{run_id}",
+    output_dir="output_dir",
     learning_rate=1e-6,
     optim="adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
     per_device_train_batch_size=batch_size,

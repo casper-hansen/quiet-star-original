@@ -2,7 +2,7 @@ import torch
 import random
 from transformers import AutoTokenizer
 
-initial_tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+initial_tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
 initial_tokenizer.padding_side = "right"
 initial_tokenizer.pad_token_id = initial_tokenizer.eos_token_id
 eval_answer_marker="\nA:"
